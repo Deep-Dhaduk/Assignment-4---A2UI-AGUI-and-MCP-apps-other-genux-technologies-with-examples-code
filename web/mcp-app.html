@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body {
+        font: 15px system-ui;
+        margin: 0;
+        padding: 22px;
+        color: #203a34;
+        background: #f1f6ef;
+      }
+      h2 {
+        margin: 0 0 8px;
+      }
+      p {
+        line-height: 1.5;
+      }
+      label {
+        display: block;
+      }
+      input,
+      button {
+        font: inherit;
+        padding: 10px;
+        border: 1px solid #9cae9e;
+        border-radius: 8px;
+      }
+      button {
+        background: #255749;
+        color: white;
+        cursor: pointer;
+      }
+      article {
+        border-top: 1px solid #cdd8cc;
+        padding: 12px 0;
+      }
+      small {
+        color: #516456;
+      }
+      iframe {
+        width: 100%;
+        height: 270px;
+        border: 0;
+      }
+      #status {
+        min-height: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <small>MCP APP · CAMPUS VENUES</small>
+    <h2>Find room for your ideas.</h2>
+    <p>The buttons call the server through the host bridge.</p>
+    <div id="filter">
+      <label for="people">Minimum capacity</label
+      ><input id="people" type="number" min="1" max="500" value="80" /><button
+        id="apply-filter"
+        type="button"
+      >
+        Filter venues
+      </button>
+    </div>
+    <p id="status" role="status">Connecting to host…</p>
+    <section id="venues"></section>
+    <div id="custom"></div>
+    <script>
+      let seq = 0;
+      const pending = new Map();
+      let current = { mode: "static" };
+      function request(method, params) {
+        return new Promise((resolve, reject) => {
+          const id = ++seq;
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error("Host response timed out"));
+          }, 15000);
+          pending.set(id, { resolve, reject, timer });
+          parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+      }
+      function show(result) {
+        if (result.isError)
+          throw new Error(result.content?.[0]?.text || "Tool failed");
+        const data =
+          result.structuredContent ||
+          JSON.parse(result.content.find((x) => x.type === "text").text);
+        current = data;
+        document.getElementById("people").value = data.attendees;
+        document.getElementById("status").textContent =
+          data.venues.length + " matching venues · no booking made";
+        const target = document.getElementById("venues");
+        target.replaceChildren();
+        function card(venue) {
+          const row = document.createElement("article"),
+            title = document.createElement("strong"),
+            detail = document.createElement("p");
+          title.textContent = venue.name;
+          detail.textContent =
+            venue.capacity + " seats · $" + venue.cost + " room hire";
+          row.append(title, detail);
+          return row;
+        }
+        function render(node) {
+          if (node.component === "VenueList") {
+            const section = document.createElement("section");
+            node.children.forEach((child) => section.append(render(child)));
+            return section;
+          }
+          if (node.component === "VenueCard") {
+            const venue = data.venues.find((v) => v.id === node.venueId);
+            if (venue) return card(venue);
+          }
+          throw new Error("Unknown component or venue reference");
+        }
+        if (data.mode === "static")
+          data.venues.forEach((venue) => target.append(card(venue)));
+        if (data.mode === "declarative" || data.mode === "mixed")
+          target.append(render(data.layout));
+        const custom = document.getElementById("custom");
+        custom.replaceChildren();
+        if (data.html) {
+          const frame = document.createElement("iframe");
+          frame.title = "Isolated ticket calculator";
+          frame.sandbox = "allow-scripts";
+          frame.srcdoc =
+            '<meta http-equiv="Content-Security-Policy" content="default-src &apos;none&apos;; script-src &apos;unsafe-inline&apos;; style-src &apos;unsafe-inline&apos;; img-src data:; form-action &apos;none&apos;; base-uri &apos;none&apos;">' +
+            data.html;
+          custom.append(frame);
+        }
+      }
+      window.addEventListener("message", (event) => {
+        if (event.source !== parent || event.data?.jsonrpc !== "2.0") return;
+        const msg = event.data;
+        if (msg.id !== undefined && pending.has(msg.id)) {
+          const p = pending.get(msg.id);
+          pending.delete(msg.id);
+          clearTimeout(p.timer);
+          msg.error
+            ? p.reject(new Error(msg.error.message))
+            : p.resolve(msg.result);
+        }
+        if (msg.method === "ui/notifications/tool-result") {
+          try {
+            show(msg.params);
+          } catch (e) {
+            document.getElementById("status").textContent = e.message;
+          }
+        }
+      });
+      document
+        .getElementById("apply-filter")
+        .addEventListener("click", async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            show(
+              await request("tools/call", {
+                name: "campus_venues",
+                arguments: {
+                  attendees: Number(document.getElementById("people").value),
+                  mode: current.mode,
+                },
+              }),
+            );
+          } catch (e) {
+            document.getElementById("status").textContent = e.message;
+          } finally {
+            button.disabled = false;
+          }
+        });
+      request("ui/initialize", {
+        appInfo: { name: "campus-venue-app", version: "1.0.0" },
+        appCapabilities: {},
+        protocolVersion: "2026-01-26",
+      })
+        .then(() => {
+          parent.postMessage(
+            {
+              jsonrpc: "2.0",
+              method: "ui/notifications/initialized",
+              params: {},
+            },
+            "*",
+          );
+        })
+        .catch(
+          (e) => (document.getElementById("status").textContent = e.message),
+        );
+    </script>
+  </body>
+</html>
